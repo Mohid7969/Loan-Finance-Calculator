@@ -2,41 +2,66 @@ import requests
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime
+import re
 
-# SBP website for policy rate (base rate)
-SBP_URL = "https://www.sbp.org.pk"
+KIBOR_URL = "https://www.sbp.org.pk/ecodata/kibor_index.asp"
+ECODATA_INDEX = "https://www.sbp.org.pk/ecodata/index2.asp"
 
-def fetch_rates():
-    # Fetch SBP policy rate (base rate)
-    policy_rate = 20.5  # fallback
-    kibor_3m = 21.9     # fallback
-    kibor_6m = 22.1     # fallback
-    murabaha = 19.0     # fallback
-
+def fetch_sbp_policy_rate():
+    """Fetch SBP policy / base rate from SBP econ-data pages."""
     try:
-        # Example scraping (needs real endpoint on SBP site)
-        resp = requests.get("https://www.sbp.org.pk/ecodata/PolicyRate.asp")
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Assume policy rate appears in first <td>
-        rate_text = soup.find("td").text.strip()
-        policy_rate = float(rate_text)
+        resp = requests.get(ECODATA_INDEX, timeout=15)
+        text = resp.text
+        soup = BeautifulSoup(text, "html.parser")
+        plain_text = soup.get_text(" ", strip=True)
+        m = re.search(r"Policy\s*Rate\s*([\d.]+)", plain_text, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
     except Exception as e:
-        print("Error fetching SBP Policy Rate:", e)
+        print("Error fetching SBP rate:", e)
+    return None
 
-    # Create JSON data
+def fetch_kibor_rates():
+    """Fetch KIBOR 3M & 6M (average of bid/offer)."""
+    kb3 = kb6 = None
+    try:
+        resp = requests.get(KIBOR_URL, timeout=15)
+        html = resp.text
+        match3 = re.search(r"3-?M\s+([\d.]+)\s+([\d.]+)", html, re.IGNORECASE)
+        match6 = re.search(r"6-?M\s+([\d.]+)\s+([\d.]+)", html, re.IGNORECASE)
+        if match3:
+            bid = float(match3.group(1))
+            offer = float(match3.group(2))
+            kb3 = (bid + offer) / 2.0
+        if match6:
+            bid = float(match6.group(1))
+            offer = float(match6.group(2))
+            kb6 = (bid + offer) / 2.0
+    except Exception as e:
+        print("Error fetching KIBOR:", e)
+    return kb3, kb6
+
+def main():
+    sbp_rate = fetch_sbp_policy_rate() or 20.5
+    kibor3m, kibor6m = fetch_kibor_rates()
+    if kibor3m is None: kibor3m = 21.9
+    if kibor6m is None: kibor6m = 22.1
+
+    # Islamic Murabaha rate = KIBOR (6M) + 2% margin
+    murabaha_rate = kibor6m + 2.0
+
     data = {
-        "sbpRate": policy_rate,
-        "kibor3m": kibor_3m,
-        "kibor6m": kibor_6m,
-        "murabahaRate": murabaha,
+        "sbpRate": sbp_rate,
+        "kibor3m": kibor3m,
+        "kibor6m": kibor6m,
+        "murabahaRate": murabaha_rate,
         "lastUpdated": datetime.utcnow().isoformat()
     }
 
-    # Save to rates.json
     with open("rates.json", "w") as f:
         json.dump(data, f, indent=2)
 
-    print("rates.json updated:", data)
+    print("✅ Rates updated:", data)
 
 if __name__ == "__main__":
-    fetch_rates()
+    main()
