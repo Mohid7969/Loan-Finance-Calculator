@@ -1,0 +1,32 @@
+name: Update Rates
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # runs every day at 6 AM UTC
+  workflow_dispatch:     # manual trigger
+
+jobs:
+  update-rates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run scraper
+        run: python scraper.py
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add rates.json
+          git commit -m "Auto-update rates.json [skip ci]" || echo "No changes"
+          git push
