@@ -2,90 +2,101 @@ import requests
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime
+import re
 
-# --- Fetch SBP Policy Rate ---
-def fetch_sbp_rate():
-    url = "https://www.sbp.org.pk/statistics/policy-rate.asp"
-    r = requests.get(url, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
+KIBOR_URL = "https://www.sbp.org.pk/ecodata/kibor_index.asp"
+ECODATA_KIBOR = KIBOR_URL
+ECODATA_INDEX = "https://www.sbp.org.pk/ecodata/kibor_index.asp"  # SBP shows base policy rate on same page
 
-    # Look for a table cell with % sign
-    for td in soup.find_all("td"):
-        text = td.get_text(strip=True).replace("%", "")
+def fetch_sbp_policy_rate(soup):
+    # The Policy Rate text appears near top of the page, e.g. “SBP Policy Rate 11.00% p.a.”
+    # Search for “SBP Policy Rate” in text
+    text = soup.get_text(" ", strip=True)
+    m = re.search(r"SBP\s*Policy\s*Rate\s*([\d.]+)\s*%?", text, re.IGNORECASE)
+    if m:
         try:
-            val = float(text)
-            if 5 < val < 30:  # sanity check range
-                return val
+            return float(m.group(1))
         except:
-            continue
+            pass
     return None
 
-# --- Fetch KIBOR 3M & 6M ---
-def fetch_kibor_rates():
-    url = "https://www.sbp.org.pk/reports/kibor.asp"
-    r = requests.get(url, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
+def fetch_kibor_rates(soup):
+    # Find rows with "3-M" or "3-M" and "6-M"
+    kibor3 = None
+    kibor6 = None
 
-    kibor3m, kibor6m = None, None
+    # Find the table containing “KIBOR” labels
+    table = None
+    # Basic find: find any <table> element that has "3-M" or "3-M" in its text
+    for tbl in soup.find_all("table"):
+        if "3-M" in tbl.get_text() or "3-M" in tbl.get_text():
+            table = tbl
+            break
 
-    # Search all rows for 3-Month and 6-Month values
-    for row in soup.find_all("tr"):
-        cols = [c.get_text(strip=True).replace("%", "") for c in row.find_all("td")]
-        if not cols:
-            continue
+    if table:
+        for tr in table.find_all("tr"):
+            cols = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            if len(cols) >= 3:
+                # The first column is the tenor
+                tenor = cols[0].strip().lower()
+                if re.match(r"3[-\u2011-]?m", tenor):  # matches "3-M", "3-M"
+                    try:
+                        bid = float(cols[1])
+                        offer = float(cols[2])
+                        kibor3 = (bid + offer) / 2.0
+                    except:
+                        pass
+                elif re.match(r"6[-\u2011-]?m", tenor):
+                    try:
+                        bid = float(cols[1])
+                        offer = float(cols[2])
+                        kibor6 = (bid + offer) / 2.0
+                    except:
+                        pass
 
-        if "3" in row.get_text():
-            for c in cols:
-                try:
-                    val = float(c)
-                    if 5 < val < 30:
-                        kibor3m = val
-                        break
-                except:
-                    continue
+    return kibor3, kibor6
 
-        if "6" in row.get_text():
-            for c in cols:
-                try:
-                    val = float(c)
-                    if 5 < val < 30:
-                        kibor6m = val
-                        break
-                except:
-                    continue
+def main():
+    try:
+        resp = requests.get(ECODATA_KIBOR, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
 
-    return kibor3m, kibor6m
+        sbp_rate = fetch_sbp_policy_rate(soup)
+        kibor3m, kibor6m = fetch_kibor_rates(soup)
 
-# --- Fetch Murabaha Rate (derived for now) ---
-def fetch_murabaha_rate(sbp_rate, kibor3m, kibor6m):
-    """
-    Since SBP doesn’t publish a single Murabaha rate,
-    we approximate:
-    - Use KIBOR 3M if available, else KIBOR 6M
-    - Add a 0.5% Islamic financing margin
-    """
-    base = kibor3m or kibor6m or sbp_rate
-    if base:
-        return round(base + 0.5, 2)
-    return None
+    except Exception as e:
+        print("Error fetching KIBOR page:", e)
+        sbp_rate, kibor3m, kibor6m = None, None, None
 
-if __name__ == "__main__":
-    sbp_rate = fetch_sbp_rate()
-    kibor3m, kibor6m = fetch_kibor_rates()
-    murabaha_rate = fetch_murabaha_rate(sbp_rate, kibor3m, kibor6m)
+    # Fallback defaults
+    if sbp_rate is None:
+        sbp_rate = 20.5
+    if kibor3m is None:
+        kibor3m = 21.9
+    if kibor6m is None:
+        kibor6m = 22.1
+
+    # Murabaha: you can make Murabaha = sbp_rate + margin (e.g. +1%)
+    margin = 1.0  # change margin if you want
+    murabaha_rate = round(sbp_rate + margin, 2)
 
     data = {
         "sbpRate": sbp_rate,
-        "kibor3m": kibor3m,
-        "kibor6m": kibor6m,
+        "kibor3m": round(kibor3m, 2),
+        "kibor6m": round(kibor6m, 2),
         "murabahaRate": murabaha_rate,
-        "lastUpdated": datetime.utcnow().isoformat()
+        "lastUpdated": datetime.utcnow().isoformat() + "Z"
     }
 
     with open("rates.json", "w") as f:
         json.dump(data, f, indent=2)
 
-    print("✅ Rates updated:", data)
+    print("✅ Updated rates:", data)
+
+if __name__ == "__main__":
+    main()
 
     with open("rates.json", "w") as f:
         json.dump(data, f, indent=2)
